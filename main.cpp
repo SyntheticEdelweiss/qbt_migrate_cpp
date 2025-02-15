@@ -8,19 +8,35 @@
 #include <QtCore/QString>
 #include <QtCore/QTextStream>
 
+void normalizePathSeparators(QString& path, QChar separator = QDir::separator())
+{
+    constexpr QChar win_separator = QChar('\\');
+    constexpr QChar linux_separator = QChar('/');
+    if (separator == win_separator)
+    {
+        path.replace(linux_separator, win_separator);
+    }
+    else // if (separator == linux_separator)
+    {
+        path.replace(win_separator, linux_separator);
+    }
+}
+
 int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
     QTextStream out(stdout);
 
     QCommandLineParser cmdParser;
-    //cmdParser.addHelpOption(); // see below
+    // cmdParser.addHelpOption(); // not using built-in help because it has awful width formatting
     cmdParser.addOption({{"h", "help", "?"}, "Displays help on commandline options."});
     cmdParser.addOptions({
       {{"e", "existing-path" }, "Existing path to look for.", "existing-path"}
     , {{"n", "new-path"      }, "New path to replace existing path with.", "new-path"}
     , {{"r", "regex"         }, "Existing and New paths are regex patterns."}
     , {{"b", "bt-backup-path"}, "BT_backup folder path (path to directory which stores .fastresume files).", "bt-backup-path"}
+    , {"separator"            , "Converts slashes (file path separators) to chosen separator (choices: native, unix, windows, \\, /), default is native.", "separator", "native"}
+    , {"example"              , "Show usage examples."}
     , {"verbose"              , "Print extra information."}
     });
     cmdParser.process(app);
@@ -30,11 +46,6 @@ int main(int argc, char* argv[])
     {
         out << QString(
         "Usage: %1 [options]\n"
-        "Example: change all paths containing \"D:/Downloads_old\" to \"D:/Downloads_new\". So e.g. \"D:/Downloads_old/Drive.mkv\" will change to \"D:/Downloads_new/Drive.mkv\"\n"
-        "         %1 -e \"D:/Downloads_old\" -n \"D:/Downloads_new\" -b \"C:/qBitTorrent/profile/qBittorrent/data/BT_backup\"\n"
-        "Example: use regex to change e.g. \"../../Downloads/Drive.mkv\" to \"F:/Downloads/Drive.mkv\"\n"
-        "         %1 -r -e \"^(?:\\.\\./){1,}Downloads/(.+)\" -n \"F:/Downloads/\\1\" -b \"C:/qBitTorrent/profile/qBittorrent/data/BT_backup\"\n"
-        "NOTE: %1 converts all \\ backslashes to / slashes, so you can write path unix-style even on Windows\n"
         "\n"
         "Options:\n"
         "  -?, -h, --help                         Displays help on commandline options.\n"
@@ -42,31 +53,56 @@ int main(int argc, char* argv[])
         "  -n, --new-path <new-path>              New path to replace existing path with.\n"
         "  -r, --regex                            Existing and New paths are regex patterns.\n"
         "  -b, --bt-backup-path <bt-backup-path>  BT_backup folder path (path to directory which stores .fastresume files).\n"
+        "  --separator                            Converts slashes (file path separators) to chosen separator (choices: native, unix, windows, \\, /), default is native.\n"
+        "  --example                              Show usage examples.\n"
         "  --verbose                              Print extra information.\n"
                ).arg(app.applicationName()) << Qt::endl;
+        return 0;
+    }
+    if (cmdParser.isSet("example"))
+    {
+        out << QString(
+        "Example: change all paths containing \"D:/Downloads_old\" to \"D:/Downloads_new\". So e.g. \"D:/Downloads_old/Drive.mkv\" will change to \"D:/Downloads_new/Drive.mkv\"\n"
+        "         %1 -e \"D:/Downloads_old\" -n \"D:/Downloads_new\" -b \"C:/qBitTorrent/profile/qBittorrent/data/BT_backup\"\n"
+        "Example: use regex to change e.g. \"../../Downloads/Drive.mkv\" to \"F:/Downloads/Drive.mkv\"\n"
+        "         %1 -r -e \"^(?:\\.\\./){1,}Downloads/(.+)\" -n \"F:/Downloads/\\1\" -b \"C:/qBitTorrent/profile/qBittorrent/data/BT_backup\"\n"
+                   ).arg(app.applicationName()) << Qt::endl;
         return 0;
     }
     if (!cmdParser.isSet("existing-path"))
     {
         out << "Error! existing-path is not set." << Qt::endl;
-        return 0;
+        return 1;
     }
     if (!cmdParser.isSet("new-path"))
     {
         out << "Error! new-path is not set." << Qt::endl;
-        return 0;
+        return 1;
     }
     if (!cmdParser.isSet("bt-backup-path"))
     {
         out << "Error! bt-backup-path is not set." << Qt::endl;
-        return 0;
+        return 1;
     }
 
-    bool isVerbose = cmdParser.isSet("verbose");
-    bool isRegex = cmdParser.isSet("regex");
-    QString beforeString(cmdParser.value("existing-path"));
-    QRegularExpression regExp(beforeString);
-    QString afterString(cmdParser.value("new-path"));
+    const QChar separator = [&]() -> QChar {
+        QString separator = cmdParser.value("separator");
+        if (separator == "windows" || separator == '\\')
+            return QChar('\\');
+        else if (separator == "unix" || separator == '/')
+            return QChar('/');
+        else if (separator == "native")
+            return QDir::separator();
+        else
+        {
+            out << "Error! separator set to unsupported value!" << Qt::endl;
+            exit(1);
+        }
+    }();
+    const bool isVerbose = cmdParser.isSet("verbose");
+    const bool isRegex = cmdParser.isSet("regex");
+    const QString beforeString = cmdParser.value("existing-path");
+    const QString afterString = cmdParser.value("new-path");
     uint affectedCounter = 0;
 
     QDir targetDir(cmdParser.value("bt-backup-path"));
@@ -88,49 +124,24 @@ int main(int argc, char* argv[])
         const QString qbt_savePath("qBt-savePath");
         const QString savePath("save_path");
 
-        if (isRegex)
-        {
-            auto lambda = [&line, &regExp, &afterString, &out, &file](const QString& findString, const bool isVerbose = false) mutable {
-                QString lengthOriginalString;
-                int pos = line.indexOf(findString, 0) + findString.length();
-                for (int t = pos; line.at(t).isDigit(); ++t)
-                    lengthOriginalString.append(line.at(t));
-                QString pathString = line.mid(pos + lengthOriginalString.length() + 1, lengthOriginalString.toInt()); // +1 for ':'
-                pathString.replace(QChar('\\'), QChar('/'));
-                QString resultingReplace = QString(pathString).replace(regExp, afterString);
-                bool isChanged = (pathString != resultingReplace); // check that original path was actually changed
-                if (isChanged && isVerbose)
-                    out << QFileInfo(file).fileName() << " : \"" << pathString << "\" -> \"" << resultingReplace << "\"" << Qt::endl;
-                resultingReplace = QString::number(resultingReplace.length()) + ":" + resultingReplace;
-                line.replace(pos, lengthOriginalString.length() + 1 + lengthOriginalString.toInt(), resultingReplace);
-                return isChanged;
-            };
-            if (lambda(qbt_savePath, isVerbose) == false)
-                continue;
-            lambda(savePath);
-        }
-        else
-        {
-            // only differs from above by: regExp -> beforeString
-            auto lambda = [&line, &beforeString, &afterString, &out, &file](const QString& findString, const bool isVerbose = false) mutable {
-                QString lengthOriginalString;
-                int pos = line.indexOf(findString, 0) + findString.length();
-                for (int t = pos; line.at(t).isDigit(); ++t)
-                    lengthOriginalString.append(line.at(t));
-                QString pathString = line.mid(pos + lengthOriginalString.length() + 1, lengthOriginalString.toInt()); // +1 for ':'
-                pathString.replace(QChar('\\'), QChar('/'));
-                QString resultingReplace = QString(pathString).replace(beforeString, afterString);
-                bool isChanged = (pathString != resultingReplace); // check that original path was actually changed
-                if (isChanged && isVerbose)
-                    out << QFileInfo(file).fileName() << " : \"" << pathString << "\" -> \"" << resultingReplace << "\"" << Qt::endl;
-                resultingReplace = QString::number(resultingReplace.length()) + ":" + resultingReplace;
-                line.replace(pos, lengthOriginalString.length() + 1 + lengthOriginalString.toInt(), resultingReplace);
-                return isChanged;
-            };
-            if (lambda(qbt_savePath, isVerbose) == false)
-                continue;
-            lambda(savePath);
-        }
+        auto lambda = [&](const QString& findString, const bool isVerbose = false) mutable {
+            QString lengthOriginalString;
+            int pos = line.indexOf(findString, 0) + findString.length();
+            for (int t = pos; line.at(t).isDigit(); ++t)
+                lengthOriginalString.append(line.at(t));
+            QString pathString = line.mid(pos + lengthOriginalString.length() + 1, lengthOriginalString.toInt()); // +1 for ':'
+            normalizePathSeparators(pathString, separator);
+            QString resultingReplace = isRegex ? QString(pathString).replace(QRegularExpression(beforeString), afterString) : QString(pathString).replace(beforeString, afterString);
+            bool isChanged = (pathString != resultingReplace); // check that original path was actually changed
+            if (isChanged && isVerbose)
+                out << QFileInfo(file).fileName() << " : \"" << pathString << "\" -> \"" << resultingReplace << "\"" << Qt::endl;
+            resultingReplace = QString::number(resultingReplace.length()) + ":" + resultingReplace;
+            line.replace(pos, lengthOriginalString.length() + 1 + lengthOriginalString.toInt(), resultingReplace);
+            return isChanged;
+        };
+        if (lambda(qbt_savePath, isVerbose) == false)
+            continue;
+        lambda(savePath);
         ++affectedCounter;
 
         QByteArray result = line.toLocal8Bit();
